@@ -239,6 +239,35 @@ struct Arbor {
         return path;
     }
 
+    // BFS for unit weights (added alongside Dijkstra so both can be compared).
+    // Same signature and same return format as shortest_path().
+    vector<int> shortest_path_bfs(const string& a, const string& b) const {
+        auto ita = id_of.find(a), itb = id_of.find(b);
+        if (ita == id_of.end() || itb == id_of.end()) return {};
+        int s = ita->second, t = itb->second;
+        int n = (int)label_of.size();
+        vector<char> visited(n, 0);
+        vector<int> parent(n, -1);
+        queue<int> q;
+        visited[s] = 1; q.push(s);
+        while(!q.empty()){
+            int u = q.front(); q.pop();
+            if (u == t) break;
+            for(int v: adj[u]){
+                if (!visited[v]){
+                    visited[v] = 1;
+                    parent[v] = u;
+                    q.push(v);
+                }
+            }
+        }
+        if (!visited[t]) return {};
+        vector<int> path;
+        for (int cur = t; cur != -1; cur = parent[cur]) path.push_back(cur);
+        reverse(path.begin(), path.end());
+        return path;
+    }
+
     void dump_veb_view() const {
         cout << "\n--- VEB View (U=" << U << ") ---\n";
         vector<int> keys; veb->enumerate(keys);
@@ -311,6 +340,34 @@ struct ArborTrie {
             }
         }
         if (dist[t] == INF) return {};
+        vector<int> path;
+        for (int cur = t; cur != -1; cur = parent[cur]) path.push_back(cur);
+        reverse(path.begin(), path.end());
+        return path;
+    }
+
+    // BFS for unit weights (added alongside Dijkstra so both can be compared).
+    // Same signature and same return format as shortest_path().
+    vector<int> shortest_path_bfs(const string& a, const string& b) const {
+        int s = trie.search(a), t = trie.search(b);
+        if (s == -1 || t == -1) return {};
+        int n = (int)label_of.size();
+        vector<char> visited(n, 0);
+        vector<int> parent(n, -1);
+        queue<int> q;
+        visited[s] = 1; q.push(s);
+        while(!q.empty()){
+            int u = q.front(); q.pop();
+            if (u == t) break;
+            for(int v: adj[u]){
+                if (!visited[v]){
+                    visited[v] = 1;
+                    parent[v] = u;
+                    q.push(v);
+                }
+            }
+        }
+        if (!visited[t]) return {};
         vector<int> path;
         for (int cur = t; cur != -1; cur = parent[cur]) path.push_back(cur);
         reverse(path.begin(), path.end());
@@ -390,6 +447,158 @@ void build_sample_animals(ArborTrie& A) {
 }
 
 // Synthetic N-level Porphyrian-style tree with branching factor B.
+// ---------------------- Custom corpus: animals + food -------------------------
+// Our own corpus, mixing THREE different terminologies over the same terms:
+//   1) biological taxonomy  : vertebrate > mammal > carnivore > felid > cat
+//   2) functional categories: flying_animal, aquatic_animal
+//   3) culinary terminology : food > animal_food > dairy > milk
+//
+// Because a term can belong to more than one of them, the graph is NOT a tree:
+// it contains cycles. Every edge marked [CYCLE] below closes a loop, because the
+// term it points at already has another parent somewhere else.
+//
+// Template so the exact same corpus feeds both index structures (VEB and Trie)
+// without keeping two copies that could drift apart.
+template <class G>
+void build_corpus(G& A){
+    // --- 1) Biological taxonomy ---
+    A.connect_parent_child("animal", "vertebrate");
+    A.connect_parent_child("vertebrate", "mammal");
+    A.connect_parent_child("vertebrate", "bird");
+    A.connect_parent_child("vertebrate", "fish");
+
+    A.connect_parent_child("mammal", "carnivore");
+    A.connect_parent_child("carnivore", "felid");
+    A.connect_parent_child("felid", "cat");
+    A.connect_parent_child("felid", "lion");
+    A.connect_parent_child("felid", "tiger");
+    A.connect_parent_child("carnivore", "canid");
+    A.connect_parent_child("canid", "dog");
+    A.connect_parent_child("canid", "wolf");
+    A.connect_parent_child("canid", "fox");
+
+    A.connect_parent_child("mammal", "primate");
+    A.connect_parent_child("primate", "hominid");
+    A.connect_parent_child("hominid", "human");
+    A.connect_parent_child("hominid", "gorilla");
+    A.connect_parent_child("hominid", "chimpanzee");
+
+    A.connect_parent_child("mammal", "cetacean");
+    A.connect_parent_child("cetacean", "whale");
+    A.connect_parent_child("cetacean", "dolphin");
+
+    A.connect_parent_child("mammal", "chiroptera");
+    A.connect_parent_child("chiroptera", "bat");
+
+    A.connect_parent_child("mammal", "rodent");
+    A.connect_parent_child("rodent", "mouse");
+    A.connect_parent_child("rodent", "rat");
+    A.connect_parent_child("rodent", "squirrel");
+
+    A.connect_parent_child("bird", "penguin");
+    A.connect_parent_child("bird", "eagle");
+    A.connect_parent_child("bird", "chicken");
+
+    A.connect_parent_child("fish", "salmon");
+    A.connect_parent_child("fish", "tuna");
+
+    // --- 2) Functional categories (cut across the taxonomy) ---
+    A.connect_parent_child("animal", "flying_animal");
+    A.connect_parent_child("flying_animal", "bat");        // [CYCLE 1] also under chiroptera
+    A.connect_parent_child("flying_animal", "eagle");      // [CYCLE 2] also under bird
+
+    A.connect_parent_child("animal", "aquatic_animal");
+    A.connect_parent_child("aquatic_animal", "whale");     // [CYCLE 3] also under cetacean
+    A.connect_parent_child("aquatic_animal", "dolphin");   // [CYCLE 4] also under cetacean
+    A.connect_parent_child("aquatic_animal", "penguin");   // [CYCLE 5] also under bird
+    A.connect_parent_child("aquatic_animal", "salmon");    // [CYCLE 6] also under fish
+    A.connect_parent_child("aquatic_animal", "tuna");      // [CYCLE 7] also under fish
+
+    // --- 3) Culinary terminology ---
+    A.connect_parent_child("food", "plant_food");
+    A.connect_parent_child("plant_food", "fruit");
+    A.connect_parent_child("fruit", "apple");
+    A.connect_parent_child("fruit", "banana");
+    A.connect_parent_child("fruit", "tomato");
+    A.connect_parent_child("plant_food", "vegetable");
+    A.connect_parent_child("vegetable", "carrot");
+    A.connect_parent_child("vegetable", "lettuce");
+    A.connect_parent_child("vegetable", "tomato");         // [CYCLE 8] fruit botanically, vegetable in cooking
+    A.connect_parent_child("plant_food", "grain");
+    A.connect_parent_child("grain", "rice");
+    A.connect_parent_child("grain", "wheat");
+
+    A.connect_parent_child("food", "animal_food");
+    A.connect_parent_child("animal_food", "meat");
+    A.connect_parent_child("meat", "beef");
+    A.connect_parent_child("meat", "pork");
+    A.connect_parent_child("meat", "poultry");
+    A.connect_parent_child("poultry", "chicken");          // [CYCLE 9] also a bird - links both domains
+
+    A.connect_parent_child("animal_food", "dairy");
+    A.connect_parent_child("dairy", "cheese");
+    A.connect_parent_child("dairy", "milk");
+    A.connect_parent_child("mammal", "milk");              // [CYCLE 10] mammals are what produces it
+
+    A.connect_parent_child("animal_food", "seafood");
+    A.connect_parent_child("seafood", "salmon");           // [CYCLE 11] also a fish
+    A.connect_parent_child("seafood", "tuna");             // [CYCLE 12] also a fish
+}
+
+// Number of independent cycles in an undirected graph (its cyclomatic number):
+//   cycles = edges - nodes + connected_components
+// A tree scores 0. Anything above 0 means there is more than one route between
+// some pair of terms, which is exactly what makes BFS vs Dijkstra interesting.
+template <class G>
+int count_independent_cycles(const G& A){
+    int n = (int)A.label_of.size();
+    long long deg_sum = 0;
+    for (int i = 0; i < n; ++i) deg_sum += (long long)A.adj[i].size();
+    int edges = (int)(deg_sum / 2);   // each edge is stored twice (undirected)
+
+    // count connected components with a simple flood fill
+    vector<char> seen(n, 0);
+    int components = 0;
+    for (int i = 0; i < n; ++i){
+        if (seen[i]) continue;
+        ++components;
+        queue<int> q; q.push(i); seen[i] = 1;
+        while(!q.empty()){
+            int u = q.front(); q.pop();
+            for (int v : A.adj[u]) if (!seen[v]) { seen[v] = 1; q.push(v); }
+        }
+    }
+    return edges - n + components;
+}
+
+// Lists the edges that actually close a cycle, using union-find: walk every
+// edge once, and if both endpoints are already in the same component then this
+// edge creates a second route between them - i.e. it closes a cycle.
+// The number of such edges always equals count_independent_cycles().
+template <class G>
+void report_cycle_edges(const G& A){
+    int n = (int)A.label_of.size();
+    vector<int> par(n);
+    for (int i = 0; i < n; ++i) par[i] = i;
+    function<int(int)> find = [&](int x){ while (par[x] != x) { par[x] = par[par[x]]; x = par[x]; } return x; };
+
+    int found = 0;
+    cout << "Edges that close a cycle (a term reachable by two different routes):\n";
+    for (int u = 0; u < n; ++u){
+        for (int v : A.adj[u]){
+            if (u >= v) continue;                 // visit each undirected edge once
+            int ru = find(u), rv = find(v);
+            if (ru == rv) {
+                ++found;
+                cout << "  " << found << ") " << A.label_of[u] << " -- " << A.label_of[v] << "\n";
+            } else {
+                par[ru] = rv;
+            }
+        }
+    }
+    if (!found) cout << "  (none - the graph is a tree)\n";
+}
+
 void build_synthetic_porhyry(Arbor& A, int levels, int B){
     if (levels <= 0) return;
     vector<string> prev;
@@ -543,6 +752,106 @@ int main(){
         cout << "Nodes between terms (excluding endpoints): " << nodes_between << "\n";
         cout << "Trie Dijkstra time: " << trie_dijk_us << " us\n";
     }
+
+    // --- Measure BFS time for the same query (VEB-indexed) ---
+    auto veb_bfs_s = high_resolution_clock::now();
+    auto veb_bfs_path = arborV.shortest_path_bfs("Plato", "chicken");
+    auto veb_bfs_e = high_resolution_clock::now();
+    auto veb_bfs_us = duration_cast<microseconds>(veb_bfs_e - veb_bfs_s).count();
+
+    if (veb_bfs_path.empty()) {
+        cout << "\nNo path found between Plato and a featherless chicken (VEB, BFS)\n";
+    } else {
+        cout << "\nShortest path (Plato -> chicken) [VEB, BFS]:\n  " << join_labels(veb_bfs_path, arborV.label_of) << "\n";
+        int edges = (int)veb_bfs_path.size() - 1;
+        int nodes_between = max(0, (int)veb_bfs_path.size() - 2);
+        cout << "Edges (hops): " << edges << "\n";
+        cout << "Nodes between terms (excluding endpoints): " << nodes_between << "\n";
+        cout << "VEB BFS time: " << veb_bfs_us << " us\n";
+    }
+
+    // --- Measure BFS time for the same query (Trie-indexed) ---
+    auto trie_bfs_s = high_resolution_clock::now();
+    auto trie_bfs_path = arborT.shortest_path_bfs("Plato", "chicken");
+    auto trie_bfs_e = high_resolution_clock::now();
+    auto trie_bfs_us = duration_cast<microseconds>(trie_bfs_e - trie_bfs_s).count();
+
+    if (trie_bfs_path.empty()) {
+        cout << "\nNo path found between Plato and a featherless chicken (Trie, BFS)\n";
+    } else {
+        cout << "\nShortest path (Plato -> chicken) [Trie, BFS]:\n  " << join_labels(trie_bfs_path, arborT.label_of) << "\n";
+        int edges = (int)trie_bfs_path.size() - 1;
+        int nodes_between = max(0, (int)trie_bfs_path.size() - 2);
+        cout << "Edges (hops): " << edges << "\n";
+        cout << "Nodes between terms (excluding endpoints): " << nodes_between << "\n";
+        cout << "Trie BFS time: " << trie_bfs_us << " us\n";
+    }
+
+    // ================= OUR OWN CORPUS (animals + food, with cycles) =================
+    cout << "\n\n========== CUSTOM CORPUS: animals + food ==========\n";
+    Arbor corpusV(/*U=*/512);
+    ArborTrie corpusT;
+
+    auto cv_s = high_resolution_clock::now();
+    build_corpus(corpusV);
+    auto cv_e = high_resolution_clock::now();
+    auto cv_build_us = duration_cast<microseconds>(cv_e - cv_s).count();
+
+    auto ct_s = high_resolution_clock::now();
+    build_corpus(corpusT);
+    auto ct_e = high_resolution_clock::now();
+    auto ct_build_us = duration_cast<microseconds>(ct_e - ct_s).count();
+
+    cout << "Terms: " << corpusV.label_of.size() << "\n";
+    cout << "Build time: VEB " << cv_build_us << " us | Trie " << ct_build_us << " us\n";
+
+    int cycles = count_independent_cycles(corpusV);
+    cout << "Independent cycles: " << cycles
+         << (cycles >= 3 ? "  (requirement of >= 3 met)" : "  (NOT ENOUGH)") << "\n\n";
+    report_cycle_edges(corpusV);
+
+    // Queries chosen so the answer depends on the cycles: each of these terms is
+    // reachable through two different categories, so a shortcut exists.
+    struct Q { const char* a; const char* b; const char* why; };
+    Q queries[] = {
+        {"bat",    "eagle",  "both are flying_animal - shortcut across the taxonomy"},
+        {"cat",    "milk",   "milk is both dairy and a mammal product"},
+        {"tomato", "beef",   "tomato is both fruit and vegetable"},
+        {"whale",  "tuna",   "both are aquatic_animal"},
+        {"dog",    "rice",   "crosses from the animal domain into the food domain"},
+    };
+
+    cout << "\n--- Dijkstra vs BFS on the corpus ---\n";
+    long long sum_d = 0, sum_b = 0;
+    for (auto& q : queries){
+        auto d0 = high_resolution_clock::now();
+        auto pd = corpusV.shortest_path(q.a, q.b);
+        auto d1 = high_resolution_clock::now();
+        auto pb_t0 = high_resolution_clock::now();
+        auto pb = corpusV.shortest_path_bfs(q.a, q.b);
+        auto pb_t1 = high_resolution_clock::now();
+
+        auto dus = duration_cast<nanoseconds>(d1 - d0).count();
+        auto bus = duration_cast<nanoseconds>(pb_t1 - pb_t0).count();
+        sum_d += dus; sum_b += bus;
+
+        cout << "\n" << q.a << " -> " << q.b << "   (" << q.why << ")\n";
+        cout << "  Dijkstra: " << join_labels(pd, corpusV.label_of) << "\n";
+        cout << "  BFS     : " << join_labels(pb, corpusV.label_of) << "\n";
+        cout << "  hops: " << (int)pb.size()-1
+             << " | same result: " << ((pd.size()==pb.size()) ? "yes" : "NO")
+             << " | Dijkstra " << dus << " ns vs BFS " << bus << " ns\n";
+    }
+    cout << "\nTotal over " << (int)(sizeof(queries)/sizeof(queries[0])) << " queries: "
+         << "Dijkstra " << sum_d << " ns | BFS " << sum_b << " ns\n";
+
+    // --- Dijkstra vs BFS summary ---
+    cout << "\n--- Dijkstra vs BFS (Plato -> chicken) ---\n";
+    cout << "VEB  : Dijkstra " << dijk_us      << " us | BFS " << veb_bfs_us  << " us\n";
+    cout << "Trie : Dijkstra " << trie_dijk_us << " us | BFS " << trie_bfs_us << " us\n";
+    cout << "All four paths identical: "
+         << ((path == veb_bfs_path && trie_path == trie_bfs_path && path == trie_path) ? "yes" : "no")
+         << "\n";
 
     return 0;
 }
