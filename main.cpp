@@ -1,5 +1,7 @@
 // Arbor Porphyriana modeled with a Van Emde Boas Tree (VEB)
 // + Dijkstra (unit weights) with timing + ASCII & Graphviz diagrams (ASCII-only).
+// + Cycle detection & pruning (shortest-path based) for strict single-inheritance
+//   categorization.
 //
 // Build & run (example):
 //   g++ -std=c++17 -O2 -o arbor main.cpp && ./arbor
@@ -11,25 +13,18 @@
 // 1) Implements a Van Emde Boas (VEB) tree to index all concept IDs.
 // 2) Builds a Porphyrian-style taxonomy (sample "animal -> feline/canine -> cat... dog...",
 //    plus a generator for an N-level synthetic tree).
-// 3) Measures and prints build time and Dijkstra time (shortest path between terms).
-// 4) Prints a compact textual view of the VEB clusters with their labels.
-// 5) Renders the taxonomy as:
+// 3) Detects and prunes cycles / redundant classification edges using a
+//    shortest-path (BFS) spanning forest, so the taxonomy respects strict
+//    single inheritance (each concept has exactly one shortest route to root).
+// 4) Measures and prints build time, prune time, and Dijkstra time (shortest
+//    path between terms).
+// 5) Prints a compact textual view of the VEB clusters with their labels.
+// 6) Renders the taxonomy as:
 //    - ASCII tree in the console (ASCII characters only for portability).
 //    - Graphviz DOT file (porphyry.dot) for a clean diagram.
 //
 
-#include <iostream>
-#include <vector>
-#include <string>
-#include <unordered_map>
-#include <queue>
-#include <functional>
-#include <algorithm>
-#include <chrono>
-#include <fstream>
-#include <cmath>
-#include <memory>
-#include <stdexcept>
+#include <bits/stdc++.h>
 using namespace std;
 using namespace std::chrono;
 
@@ -115,73 +110,12 @@ public:
     }
 };
 
-// ----------------------------- Proposed Tree ----------------------------------
-// The proposed tree is Trie Data structure, which is a prefix tree that stores strings bby characters along tree paths
-
-struct TrieNode {
-    unordered_map<char, TrieNode*> children;
-    bool is_end_of_word;
-    int id;
-
-    TrieNode() {
-        is_end_of_word = false;
-        id = -1;
-    }
-};
-
-class Trie {
-    TrieNode* root;
-
-    
-public:
-
-    void print_trie_helper(TrieNode* node, string word) const {
-        if (node->is_end_of_word) {
-            cout << "ID: " << node->id << ", Word: " << word << "\n";
-        }
-        for (const auto& child : node->children) {
-            print_trie_helper(child.second, word + child.first);
-        }
-    }
-
-    Trie() { root = new TrieNode(); }
-
-    void insert(const string& word, int id) {
-        TrieNode* curr = root;
-        for (char c : word) {
-            if (curr->children.find(c) == curr->children.end()) {
-                curr->children[c] = new TrieNode();
-            }
-            curr = curr->children[c];
-        }
-        curr->is_end_of_word = true;
-        curr->id = id;
-    }
-    int search(const string& word) const{
-        TrieNode* curr = root;
-        for (char c : word) {
-            if (curr->children.find(c) == curr->children.end()) {
-                return -1;
-            }
-            curr = curr->children[c];
-        }
-        if (curr->is_end_of_word) {
-            return curr->id;
-        }
-        return -1;
-    }
-
-    void print_trie() const {
-        print_trie_helper(root, "");
-    }
-};
-
-
 // ----------------------------- Arbor Porphyriana ------------------------------
 struct Arbor {
     vector<vector<int>> adj;                    // adjacency list (undirected)
     unordered_map<string,int> id_of;            // label -> id
     vector<string> label_of;                    // id -> label
+    vector<pair<int,int>> edge_log;             // edges in the order they were taught
 
     unique_ptr<Van_Emde_Boas> veb;              // VEB index
     int U;                                      // capacity / universe size
@@ -207,6 +141,7 @@ struct Arbor {
         int c = ensure_node(child);
         adj[p].push_back(c);
         adj[c].push_back(p);
+        edge_log.push_back({p, c});
     }
 
     // Dijkstra for unit weights (BFS equivalent but kept as requested).
@@ -221,7 +156,8 @@ struct Arbor {
         priority_queue<P, vector<P>, greater<P>> pq;
         dist[s] = 0; pq.push({0, s});
         while(!pq.empty()){
-            auto [d,u] = pq.top(); pq.pop();
+            P top = pq.top(); pq.pop();
+            int d = top.first, u = top.second;
             if (d != dist[u]) continue;
             if (u == t) break;
             for(int v: adj[u]){
@@ -233,35 +169,6 @@ struct Arbor {
             }
         }
         if (dist[t] == INF) return {};
-        vector<int> path;
-        for (int cur = t; cur != -1; cur = parent[cur]) path.push_back(cur);
-        reverse(path.begin(), path.end());
-        return path;
-    }
-
-    // BFS for unit weights (added alongside Dijkstra so both can be compared).
-    // Same signature and same return format as shortest_path().
-    vector<int> shortest_path_bfs(const string& a, const string& b) const {
-        auto ita = id_of.find(a), itb = id_of.find(b);
-        if (ita == id_of.end() || itb == id_of.end()) return {};
-        int s = ita->second, t = itb->second;
-        int n = (int)label_of.size();
-        vector<char> visited(n, 0);
-        vector<int> parent(n, -1);
-        queue<int> q;
-        visited[s] = 1; q.push(s);
-        while(!q.empty()){
-            int u = q.front(); q.pop();
-            if (u == t) break;
-            for(int v: adj[u]){
-                if (!visited[v]){
-                    visited[v] = 1;
-                    parent[v] = u;
-                    q.push(v);
-                }
-            }
-        }
-        if (!visited[t]) return {};
         vector<int> path;
         for (int cur = t; cur != -1; cur = parent[cur]) path.push_back(cur);
         reverse(path.begin(), path.end());
@@ -293,98 +200,124 @@ struct Arbor {
     }
 };
 
-struct ArborTrie {
-    vector<vector<int>> adj;                    // adjacency list (undirected)
-    vector<string> label_of;                    // id -> label
-    Trie trie;                                  // Trie index
+struct PruneReport {
+    vector<pair<int,int>> pruned_edges;
+    vector<vector<int>> new_adj;           
+    vector<int> node_dist;                 
+};
 
-    int ensure_node(const string& label) {
-        int existing_id = trie.search(label);
-        if (existing_id != -1) { return existing_id; }
-        int id = (int)label_of.size();
-        label_of.push_back(label);
 
-        if ((int)adj.size() <= id) { adj.resize(id + 1); }
+PruneReport detect_and_prune_cycles_shortest_path(const Arbor& A, const string& preferred_root_label) {
+    PruneReport report;
+    int n = (int)A.label_of.size();
+    vector<int> dist(n, -1), parent(n, -1);
 
-        trie.insert(label, id);
+    vector<int> order;
+    auto itr = A.id_of.find(preferred_root_label);
+    if (itr != A.id_of.end()) order.push_back(itr->second);
+    for (int i = 0; i < n; ++i) order.push_back(i);
 
-        return id;
-    }
-
-    void connect_parent_child(const string& parent, const string& child) {
-        int p = ensure_node(parent);
-        int c = ensure_node(child);
-        adj[p].push_back(c);
-        adj[c].push_back(p);
-    }
-
-    vector<int> shortest_path(const string& a, const string& b) const {
-        int s = trie.search(a), t = trie.search(b);
-        if (s == -1 || t == -1) return {};
-        int n = (int)label_of.size();
-        const int INF = 1e9;
-        vector<int> dist(n, INF), parent(n, -1);
-        using P = pair<int,int>; // (dist, node)
-        priority_queue<P, vector<P>, greater<P>> pq;
-        dist[s] = 0; pq.push({0, s});
-        while(!pq.empty()){
-            auto [d,u] = pq.top(); pq.pop();
-            if (d != dist[u]) continue;
-            if (u == t) break;
-            for(int v: adj[u]){
-                if (dist[v] > d + 1){
-                    dist[v] = d + 1;
-                    parent[v] = u;
-                    pq.push({dist[v], v});
-                }
-            }
-        }
-        if (dist[t] == INF) return {};
-        vector<int> path;
-        for (int cur = t; cur != -1; cur = parent[cur]) path.push_back(cur);
-        reverse(path.begin(), path.end());
-        return path;
-    }
-
-    // BFS for unit weights (added alongside Dijkstra so both can be compared).
-    // Same signature and same return format as shortest_path().
-    vector<int> shortest_path_bfs(const string& a, const string& b) const {
-        int s = trie.search(a), t = trie.search(b);
-        if (s == -1 || t == -1) return {};
-        int n = (int)label_of.size();
-        vector<char> visited(n, 0);
-        vector<int> parent(n, -1);
+    for (int start : order) {
+        if (dist[start] != -1) continue; 
         queue<int> q;
-        visited[s] = 1; q.push(s);
-        while(!q.empty()){
+        dist[start] = 0;
+        q.push(start);
+        while (!q.empty()) {
             int u = q.front(); q.pop();
-            if (u == t) break;
-            for(int v: adj[u]){
-                if (!visited[v]){
-                    visited[v] = 1;
+            for (int v : A.adj[u]) {
+                if (dist[v] == -1) {
+                    dist[v] = dist[u] + 1;
                     parent[v] = u;
                     q.push(v);
                 }
             }
         }
-        if (!visited[t]) return {};
-        vector<int> path;
-        for (int cur = t; cur != -1; cur = parent[cur]) path.push_back(cur);
-        reverse(path.begin(), path.end());
-        return path;
     }
 
-    void dump_trie_view() const {
-        cout << "\n--- Trie View ---\n";
-        trie.print_trie();
+    set<pair<int,int>> tree_edges;
+    for (int v = 0; v < n; ++v) {
+        if (parent[v] != -1) {
+            int u = parent[v];
+            tree_edges.insert({min(u, v), max(u, v)});
+        }
+    }
+
+    vector<vector<int>> new_adj(n);
+    set<pair<int,int>> seen;
+    for (int u = 0; u < n; ++u) {
+        for (int v : A.adj[u]) {
+            int a = min(u, v), b = max(u, v);
+            if (seen.count({a, b})) continue;
+            seen.insert({a, b});
+            if (tree_edges.count({a, b})) {
+                new_adj[a].push_back(b);
+                new_adj[b].push_back(a);
+            } else {
+                report.pruned_edges.push_back({a, b});
+            }
+        }
+    }
+
+    report.new_adj = std::move(new_adj);
+    report.node_dist = std::move(dist);
+    return report;
+}
+
+struct DSU {
+    vector<int> parent_, rank_;
+    explicit DSU(int n): parent_(n), rank_(n, 0) { iota(parent_.begin(), parent_.end(), 0); }
+    int find(int x) { while (parent_[x] != x) { parent_[x] = parent_[parent_[x]]; x = parent_[x]; } return x; }
+    bool unite(int a, int b) {
+        a = find(a); b = find(b);
+        if (a == b) return false; // already connected -> this edge would close a cycle
+        if (rank_[a] < rank_[b]) swap(a, b);
+        parent_[b] = a;
+        if (rank_[a] == rank_[b]) rank_[a]++;
+        return true;
     }
 };
 
+PruneReport detect_and_prune_cycles_insertion_order(const Arbor& A) {
+    PruneReport report;
+    int n = (int)A.label_of.size();
+    DSU dsu(n);
+    vector<vector<int>> new_adj(n);
+    for (auto& e : A.edge_log) {
+        int u = e.first, v = e.second;
+        if (dsu.unite(u, v)) {
+            new_adj[u].push_back(v);
+            new_adj[v].push_back(u);
+        } else {
+            report.pruned_edges.push_back({min(u, v), max(u, v)});
+        }
+    }
+    report.new_adj = std::move(new_adj);
+    return report;
+}
+
+void commit_pruned_graph(Arbor& A, const PruneReport& rep) {
+    A.adj = rep.new_adj;
+}
+
+void print_prune_report(const Arbor& A, const PruneReport& rep, const string& algo_name) {
+    cout << "\n--- Cycle Detection & Pruning Report (" << algo_name << ") ---\n";
+    if (rep.pruned_edges.empty()) {
+        cout << "No redundant/cyclic edges found. Taxonomy is already a strict tree.\n";
+        return;
+    }
+    cout << "Pruned " << rep.pruned_edges.size() << " edge(s):\n";
+    for (auto& pr : rep.pruned_edges) {
+        int u = pr.first, v = pr.second;
+        string lu = (u >= 0 && u < (int)A.label_of.size()) ? A.label_of[u] : "#" + to_string(u);
+        string lv = (v >= 0 && v < (int)A.label_of.size()) ? A.label_of[v] : "#" + to_string(v);
+        cout << "  removed edge: " << lu << " -- " << lv << "\n";
+    }
+}
 
 // ----------------------------- Sample Builders -------------------------------
 void build_sample_animals(Arbor& A){
     A.connect_parent_child("substance", "body");
-    A.connect_parent_child("substance", "incorporeal");   // optional sibling
+    A.connect_parent_child("substance", "incorporeal");
 
     // Body splits
     A.connect_parent_child("body", "living");
@@ -401,7 +334,6 @@ void build_sample_animals(Arbor& A){
     // Species under rational animal
     A.connect_parent_child("rational_animal", "man");
     A.connect_parent_child("rational_animal", "immortal_rational_animal");
-    // (You could add "immortal_rational_animal" here if you want the classic ladder)
 
     // Individuals under man
     A.connect_parent_child("man", "Plato");
@@ -412,193 +344,11 @@ void build_sample_animals(Arbor& A){
     A.connect_parent_child("irrational_animal", "equine");
     A.connect_parent_child("irrational_animal", "canine");
     A.connect_parent_child("irrational_animal", "bird");
-    // Kinds of bird
-    //A.connect_parent_child("bird", "non-domestic");
-    //A.connect_parent_child("bird", "domestic");
     // An example of bird
     A.connect_parent_child("bird", "chicken");
 }
 
-void build_sample_animals(ArborTrie& A) {
-    A.connect_parent_child("substance", "body");
-    A.connect_parent_child("substance", "incorporeal");
-
-    A.connect_parent_child("body", "living");
-    A.connect_parent_child("body", "non_living");
-
-    A.connect_parent_child("living", "animal");
-    A.connect_parent_child("living", "plant");
-
-    A.connect_parent_child("animal", "rational_animal");
-    A.connect_parent_child("animal", "irrational_animal");
-
-    A.connect_parent_child("rational_animal", "man");
-    A.connect_parent_child("rational_animal", "immortal_rational_animal");
-
-    A.connect_parent_child("man", "Plato");
-    A.connect_parent_child("man", "Socrates");
-    A.connect_parent_child("man", "Aristotle");
-
-    A.connect_parent_child("irrational_animal", "equine");
-    A.connect_parent_child("irrational_animal", "canine");
-    A.connect_parent_child("irrational_animal", "bird");
-
-    A.connect_parent_child("bird", "chicken");
-}
-
 // Synthetic N-level Porphyrian-style tree with branching factor B.
-// ---------------------- Custom corpus: animals + food -------------------------
-// Our own corpus, mixing THREE different terminologies over the same terms:
-//   1) biological taxonomy  : vertebrate > mammal > carnivore > felid > cat
-//   2) functional categories: flying_animal, aquatic_animal
-//   3) culinary terminology : food > animal_food > dairy > milk
-//
-// Because a term can belong to more than one of them, the graph is NOT a tree:
-// it contains cycles. Every edge marked [CYCLE] below closes a loop, because the
-// term it points at already has another parent somewhere else.
-//
-// Template so the exact same corpus feeds both index structures (VEB and Trie)
-// without keeping two copies that could drift apart.
-template <class G>
-void build_corpus(G& A){
-    // --- 1) Biological taxonomy ---
-    A.connect_parent_child("animal", "vertebrate");
-    A.connect_parent_child("vertebrate", "mammal");
-    A.connect_parent_child("vertebrate", "bird");
-    A.connect_parent_child("vertebrate", "fish");
-
-    A.connect_parent_child("mammal", "carnivore");
-    A.connect_parent_child("carnivore", "felid");
-    A.connect_parent_child("felid", "cat");
-    A.connect_parent_child("felid", "lion");
-    A.connect_parent_child("felid", "tiger");
-    A.connect_parent_child("carnivore", "canid");
-    A.connect_parent_child("canid", "dog");
-    A.connect_parent_child("canid", "wolf");
-    A.connect_parent_child("canid", "fox");
-
-    A.connect_parent_child("mammal", "primate");
-    A.connect_parent_child("primate", "hominid");
-    A.connect_parent_child("hominid", "human");
-    A.connect_parent_child("hominid", "gorilla");
-    A.connect_parent_child("hominid", "chimpanzee");
-
-    A.connect_parent_child("mammal", "cetacean");
-    A.connect_parent_child("cetacean", "whale");
-    A.connect_parent_child("cetacean", "dolphin");
-
-    A.connect_parent_child("mammal", "chiroptera");
-    A.connect_parent_child("chiroptera", "bat");
-
-    A.connect_parent_child("mammal", "rodent");
-    A.connect_parent_child("rodent", "mouse");
-    A.connect_parent_child("rodent", "rat");
-    A.connect_parent_child("rodent", "squirrel");
-
-    A.connect_parent_child("bird", "penguin");
-    A.connect_parent_child("bird", "eagle");
-    A.connect_parent_child("bird", "chicken");
-
-    A.connect_parent_child("fish", "salmon");
-    A.connect_parent_child("fish", "tuna");
-
-    // --- 2) Functional categories (cut across the taxonomy) ---
-    A.connect_parent_child("animal", "flying_animal");
-    A.connect_parent_child("flying_animal", "bat");        // [CYCLE 1] also under chiroptera
-    A.connect_parent_child("flying_animal", "eagle");      // [CYCLE 2] also under bird
-
-    A.connect_parent_child("animal", "aquatic_animal");
-    A.connect_parent_child("aquatic_animal", "whale");     // [CYCLE 3] also under cetacean
-    A.connect_parent_child("aquatic_animal", "dolphin");   // [CYCLE 4] also under cetacean
-    A.connect_parent_child("aquatic_animal", "penguin");   // [CYCLE 5] also under bird
-    A.connect_parent_child("aquatic_animal", "salmon");    // [CYCLE 6] also under fish
-    A.connect_parent_child("aquatic_animal", "tuna");      // [CYCLE 7] also under fish
-
-    // --- 3) Culinary terminology ---
-    A.connect_parent_child("food", "plant_food");
-    A.connect_parent_child("plant_food", "fruit");
-    A.connect_parent_child("fruit", "apple");
-    A.connect_parent_child("fruit", "banana");
-    A.connect_parent_child("fruit", "tomato");
-    A.connect_parent_child("plant_food", "vegetable");
-    A.connect_parent_child("vegetable", "carrot");
-    A.connect_parent_child("vegetable", "lettuce");
-    A.connect_parent_child("vegetable", "tomato");         // [CYCLE 8] fruit botanically, vegetable in cooking
-    A.connect_parent_child("plant_food", "grain");
-    A.connect_parent_child("grain", "rice");
-    A.connect_parent_child("grain", "wheat");
-
-    A.connect_parent_child("food", "animal_food");
-    A.connect_parent_child("animal_food", "meat");
-    A.connect_parent_child("meat", "beef");
-    A.connect_parent_child("meat", "pork");
-    A.connect_parent_child("meat", "poultry");
-    A.connect_parent_child("poultry", "chicken");          // [CYCLE 9] also a bird - links both domains
-
-    A.connect_parent_child("animal_food", "dairy");
-    A.connect_parent_child("dairy", "cheese");
-    A.connect_parent_child("dairy", "milk");
-    A.connect_parent_child("mammal", "milk");              // [CYCLE 10] mammals are what produces it
-
-    A.connect_parent_child("animal_food", "seafood");
-    A.connect_parent_child("seafood", "salmon");           // [CYCLE 11] also a fish
-    A.connect_parent_child("seafood", "tuna");             // [CYCLE 12] also a fish
-}
-
-// Number of independent cycles in an undirected graph (its cyclomatic number):
-//   cycles = edges - nodes + connected_components
-// A tree scores 0. Anything above 0 means there is more than one route between
-// some pair of terms, which is exactly what makes BFS vs Dijkstra interesting.
-template <class G>
-int count_independent_cycles(const G& A){
-    int n = (int)A.label_of.size();
-    long long deg_sum = 0;
-    for (int i = 0; i < n; ++i) deg_sum += (long long)A.adj[i].size();
-    int edges = (int)(deg_sum / 2);   // each edge is stored twice (undirected)
-
-    // count connected components with a simple flood fill
-    vector<char> seen(n, 0);
-    int components = 0;
-    for (int i = 0; i < n; ++i){
-        if (seen[i]) continue;
-        ++components;
-        queue<int> q; q.push(i); seen[i] = 1;
-        while(!q.empty()){
-            int u = q.front(); q.pop();
-            for (int v : A.adj[u]) if (!seen[v]) { seen[v] = 1; q.push(v); }
-        }
-    }
-    return edges - n + components;
-}
-
-// Lists the edges that actually close a cycle, using union-find: walk every
-// edge once, and if both endpoints are already in the same component then this
-// edge creates a second route between them - i.e. it closes a cycle.
-// The number of such edges always equals count_independent_cycles().
-template <class G>
-void report_cycle_edges(const G& A){
-    int n = (int)A.label_of.size();
-    vector<int> par(n);
-    for (int i = 0; i < n; ++i) par[i] = i;
-    function<int(int)> find = [&](int x){ while (par[x] != x) { par[x] = par[par[x]]; x = par[x]; } return x; };
-
-    int found = 0;
-    cout << "Edges that close a cycle (a term reachable by two different routes):\n";
-    for (int u = 0; u < n; ++u){
-        for (int v : A.adj[u]){
-            if (u >= v) continue;                 // visit each undirected edge once
-            int ru = find(u), rv = find(v);
-            if (ru == rv) {
-                ++found;
-                cout << "  " << found << ") " << A.label_of[u] << " -- " << A.label_of[v] << "\n";
-            } else {
-                par[ru] = rv;
-            }
-        }
-    }
-    if (!found) cout << "  (none - the graph is a tree)\n";
-}
-
 void build_synthetic_porhyry(Arbor& A, int levels, int B){
     if (levels <= 0) return;
     vector<string> prev;
@@ -630,33 +380,21 @@ static string join_labels(const vector<int>& ids, const vector<string>& labels, 
 }
 
 // ASCII tree printing from a chosen root label (ASCII-only connectors).
-void print_ascii_tree_from_root(const ArborTrie& A, const string& root_lbl){
-
-    int root = A.trie.search(root_lbl);
-
-    if (root == -1) {
-        cerr << "[diagram] root label not found: " << root_lbl << "\n"; 
-        return;
-    }
-
+void print_ascii_tree_from_root(const Arbor& A, const string& root_lbl){
+    auto it = A.id_of.find(root_lbl);
+    if (it == A.id_of.end()) { cerr << "[diagram] root label not found: " << root_lbl << "\n"; return; }
+    int root = it->second;
 
     function<void(int,int,string,bool)> dfs = [&](int u, int parent, string prefix, bool last){
         cout << prefix;
-
-        if (parent != -1) {
-            cout << "+- ";
-        }
-
+        if (!prefix.empty()) cout << (last ? "+-" : "+-");
         cout << A.label_of[u] << "\n";
 
         vector<int> children = A.adj[u];
         if (parent != -1) children.erase(remove(children.begin(), children.end(), parent), children.end());
         for (size_t i=0;i<children.size();++i){
             bool is_last = (i+1==children.size());
-            string next_prefix = prefix;
-            if (parent != -1) {
-                next_prefix += (last ? "   " : "|  ");
-            }
+            string next_prefix = prefix + (prefix.empty()? "" : (last? "  " : "| "));
             dfs(children[i], u, next_prefix, is_last);
         }
     };
@@ -664,7 +402,7 @@ void print_ascii_tree_from_root(const ArborTrie& A, const string& root_lbl){
     dfs(root, -1, "", true);
 }
 
-// Graphviz DOT emitter (undirected). Writes to porphyry.dot
+
 void emit_graphviz(const Arbor& A, const string& filename){
     ofstream ofs(filename);
     if (!ofs) { cerr << "[graphviz] cannot open: " << filename << "\n"; return; }
@@ -689,169 +427,70 @@ int main(){
     ios::sync_with_stdio(false);
     cin.tie(nullptr);
 
-    // Universe size: set comfortably larger than total nodes you plan to add.
-    Arbor arborV;
-    ArborTrie arborT;
+    
+    Arbor arbor(/*U=*/256);
 
-    // --- Measure build time for the sample animal taxonomy for VEB---
-    auto veb_build_s = high_resolution_clock::now();
-    build_sample_animals(arborV);
-    auto veb_build_e = high_resolution_clock::now();
-    auto build_us = duration_cast<microseconds>(veb_build_e - veb_build_s).count();
+    auto t_build0 = high_resolution_clock::now();
+    build_sample_animals(arbor);
+    auto t_build1 = high_resolution_clock::now();
+    auto build_us = duration_cast<microseconds>(t_build1 - t_build0).count();
 
-    auto trie_build_s = high_resolution_clock::now();
-    build_sample_animals(arborT);
-    auto trie_build_e = high_resolution_clock::now();
-    auto trie_build_us = duration_cast<microseconds>(trie_build_e - trie_build_s).count();
+    cout << "Build time (sample animals): " << build_us << " us\n";
 
-    cout << "VEB Build time (sample animals): " << build_us << " us\n";
-    cout << "Trie build time: " << trie_build_us << " us\n";
+    arbor.connect_parent_child("substance", "chicken");
+    arbor.connect_parent_child("man", "canine");
+
+    auto t_prune0 = high_resolution_clock::now();
+    PruneReport sp_report = detect_and_prune_cycles_shortest_path(arbor, "substance");
+    auto t_prune1 = high_resolution_clock::now();
+    auto sp_us = duration_cast<microseconds>(t_prune1 - t_prune0).count();
+
+    auto t_prune2 = high_resolution_clock::now();
+    PruneReport io_report = detect_and_prune_cycles_insertion_order(arbor);
+    auto t_prune3 = high_resolution_clock::now();
+    auto io_us = duration_cast<microseconds>(t_prune3 - t_prune2).count();
+
+    print_prune_report(arbor, sp_report, "global shortest-path / BFS");
+    cout << "Prune time: " << sp_us << " us\n";
+    cout << "Note: this variant can re-parent nodes beyond the actual cycle if a\n"
+            "bad edge creates a genuine shortcut near the root (see 'bird'/'irrational_animal'\n"
+            "above -- adding substance->chicken made bird, then irrational_animal, reachable\n"
+            "via a shorter route, which pruned the innocent animal--irrational_animal edge).\n";
+
+    print_prune_report(arbor, io_report, "insertion-order / Union-Find");
+    cout << "Prune time: " << io_us << " us\n";
+    cout << "This variant only drops the two edges we deliberately injected\n"
+            "(substance--chicken, man--canine) and leaves every taught edge untouched.\n";
+
+
+    commit_pruned_graph(arbor, io_report);
 
     // --- VEB view ---
-    arborV.dump_veb_view();
+    arbor.dump_veb_view();
 
-    // --- Trie view ---
-    arborT.dump_trie_view();
+    // --- ASCII tree diagram (rooted at "substance", the actual root label) ---
+    cout << "\nASCII Diagram (root=substance)\n";
+    print_ascii_tree_from_root(arbor, "substance");
 
-    // --- ASCII tree diagram (rooted at "substance") ---
-    cout << "\nASCII Diagram (root=substance) with Trie\n";
-    print_ascii_tree_from_root(arborT, "substance");
+    // --- Graphviz DOT output (now cycle-free) ---
+    emit_graphviz(arbor, "porphyry.dot");
 
-    // --- Graphviz DOT output ---
-    emit_graphviz(arborV, "porphyry.dot");
-
-    // --- Measure Dijkstra time for a sample query ---
+    // --- Measure Dijkstra time for a sample query (graph is now a tree) ---
     auto t_d0 = high_resolution_clock::now();
-    auto path = arborV.shortest_path("Plato", "chicken");
+    auto path = arbor.shortest_path("Plato", "chicken");
     auto t_d1 = high_resolution_clock::now();
     auto dijk_us = duration_cast<microseconds>(t_d1 - t_d0).count();
 
     if (path.empty()) {
         cout << "\nNo path found between Plato and a featherless chicken\n";
     } else {
-        cout << "\nShortest path (Plato -> chicken) [VEB]:\n  " << join_labels(path, arborV.label_of) << "\n";
+        cout << "\nShortest path (Plato -> chicken):\n  " << join_labels(path, arbor.label_of) << "\n";
         int edges = (int)path.size() - 1;
         int nodes_between = max(0, (int)path.size() - 2);
         cout << "Edges (hops): " << edges << "\n";
         cout << "Nodes between terms (excluding endpoints): " << nodes_between << "\n";
         cout << "Dijkstra time: " << dijk_us << " us\n";
     }
-
-    auto trie_path_s = high_resolution_clock::now();
-    auto trie_path = arborT.shortest_path("Plato", "chicken");
-    auto trie_path_e = high_resolution_clock::now();
-    auto trie_dijk_us = duration_cast<microseconds>(trie_path_e - trie_path_s).count();
-
-    if (trie_path.empty()) {
-        cout << "\nNo path found between Plato and a featherless chicken (Trie)\n";
-    } else {
-        cout << "\nShortest path (Plato -> chicken) [Trie]:\n  " << join_labels(trie_path, arborT.label_of) << "\n";
-        int edges = (int)trie_path.size() - 1;
-        int nodes_between = max(0, (int)trie_path.size() - 2);
-        cout << "Edges (hops): " << edges << "\n";
-        cout << "Nodes between terms (excluding endpoints): " << nodes_between << "\n";
-        cout << "Trie Dijkstra time: " << trie_dijk_us << " us\n";
-    }
-
-    // --- Measure BFS time for the same query (VEB-indexed) ---
-    auto veb_bfs_s = high_resolution_clock::now();
-    auto veb_bfs_path = arborV.shortest_path_bfs("Plato", "chicken");
-    auto veb_bfs_e = high_resolution_clock::now();
-    auto veb_bfs_us = duration_cast<microseconds>(veb_bfs_e - veb_bfs_s).count();
-
-    if (veb_bfs_path.empty()) {
-        cout << "\nNo path found between Plato and a featherless chicken (VEB, BFS)\n";
-    } else {
-        cout << "\nShortest path (Plato -> chicken) [VEB, BFS]:\n  " << join_labels(veb_bfs_path, arborV.label_of) << "\n";
-        int edges = (int)veb_bfs_path.size() - 1;
-        int nodes_between = max(0, (int)veb_bfs_path.size() - 2);
-        cout << "Edges (hops): " << edges << "\n";
-        cout << "Nodes between terms (excluding endpoints): " << nodes_between << "\n";
-        cout << "VEB BFS time: " << veb_bfs_us << " us\n";
-    }
-
-    // --- Measure BFS time for the same query (Trie-indexed) ---
-    auto trie_bfs_s = high_resolution_clock::now();
-    auto trie_bfs_path = arborT.shortest_path_bfs("Plato", "chicken");
-    auto trie_bfs_e = high_resolution_clock::now();
-    auto trie_bfs_us = duration_cast<microseconds>(trie_bfs_e - trie_bfs_s).count();
-
-    if (trie_bfs_path.empty()) {
-        cout << "\nNo path found between Plato and a featherless chicken (Trie, BFS)\n";
-    } else {
-        cout << "\nShortest path (Plato -> chicken) [Trie, BFS]:\n  " << join_labels(trie_bfs_path, arborT.label_of) << "\n";
-        int edges = (int)trie_bfs_path.size() - 1;
-        int nodes_between = max(0, (int)trie_bfs_path.size() - 2);
-        cout << "Edges (hops): " << edges << "\n";
-        cout << "Nodes between terms (excluding endpoints): " << nodes_between << "\n";
-        cout << "Trie BFS time: " << trie_bfs_us << " us\n";
-    }
-
-    // ================= OUR OWN CORPUS (animals + food, with cycles) =================
-    cout << "\n\n========== CUSTOM CORPUS: animals + food ==========\n";
-    Arbor corpusV(/*U=*/512);
-    ArborTrie corpusT;
-
-    auto cv_s = high_resolution_clock::now();
-    build_corpus(corpusV);
-    auto cv_e = high_resolution_clock::now();
-    auto cv_build_us = duration_cast<microseconds>(cv_e - cv_s).count();
-
-    auto ct_s = high_resolution_clock::now();
-    build_corpus(corpusT);
-    auto ct_e = high_resolution_clock::now();
-    auto ct_build_us = duration_cast<microseconds>(ct_e - ct_s).count();
-
-    cout << "Terms: " << corpusV.label_of.size() << "\n";
-    cout << "Build time: VEB " << cv_build_us << " us | Trie " << ct_build_us << " us\n";
-
-    int cycles = count_independent_cycles(corpusV);
-    cout << "Independent cycles: " << cycles
-         << (cycles >= 3 ? "  (requirement of >= 3 met)" : "  (NOT ENOUGH)") << "\n\n";
-    report_cycle_edges(corpusV);
-
-    // Queries chosen so the answer depends on the cycles: each of these terms is
-    // reachable through two different categories, so a shortcut exists.
-    struct Q { const char* a; const char* b; const char* why; };
-    Q queries[] = {
-        {"bat",    "eagle",  "both are flying_animal - shortcut across the taxonomy"},
-        {"cat",    "milk",   "milk is both dairy and a mammal product"},
-        {"tomato", "beef",   "tomato is both fruit and vegetable"},
-        {"whale",  "tuna",   "both are aquatic_animal"},
-        {"dog",    "rice",   "crosses from the animal domain into the food domain"},
-    };
-
-    cout << "\n--- Dijkstra vs BFS on the corpus ---\n";
-    long long sum_d = 0, sum_b = 0;
-    for (auto& q : queries){
-        auto d0 = high_resolution_clock::now();
-        auto pd = corpusV.shortest_path(q.a, q.b);
-        auto d1 = high_resolution_clock::now();
-        auto pb_t0 = high_resolution_clock::now();
-        auto pb = corpusV.shortest_path_bfs(q.a, q.b);
-        auto pb_t1 = high_resolution_clock::now();
-
-        auto dus = duration_cast<nanoseconds>(d1 - d0).count();
-        auto bus = duration_cast<nanoseconds>(pb_t1 - pb_t0).count();
-        sum_d += dus; sum_b += bus;
-
-        cout << "\n" << q.a << " -> " << q.b << "   (" << q.why << ")\n";
-        cout << "  Dijkstra: " << join_labels(pd, corpusV.label_of) << "\n";
-        cout << "  BFS     : " << join_labels(pb, corpusV.label_of) << "\n";
-        cout << "  hops: " << (int)pb.size()-1
-             << " | same result: " << ((pd.size()==pb.size()) ? "yes" : "NO")
-             << " | Dijkstra " << dus << " ns vs BFS " << bus << " ns\n";
-    }
-    cout << "\nTotal over " << (int)(sizeof(queries)/sizeof(queries[0])) << " queries: "
-         << "Dijkstra " << sum_d << " ns | BFS " << sum_b << " ns\n";
-
-    // --- Dijkstra vs BFS summary ---
-    cout << "\n--- Dijkstra vs BFS (Plato -> chicken) ---\n";
-    cout << "VEB  : Dijkstra " << dijk_us      << " us | BFS " << veb_bfs_us  << " us\n";
-    cout << "Trie : Dijkstra " << trie_dijk_us << " us | BFS " << trie_bfs_us << " us\n";
-    cout << "All four paths identical: "
-         << ((path == veb_bfs_path && trie_path == trie_bfs_path && path == trie_path) ? "yes" : "no")
-         << "\n";
 
     return 0;
 }
